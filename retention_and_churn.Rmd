@@ -1,0 +1,172 @@
+---
+title: "Retention and Churn"
+author: "Ricardo Vladimiro"
+date: "2015-07-13"
+output:
+  html_document:
+    highlight: tango
+    theme: cosmo
+---
+
+#### [Blog](https://ongamesndata.wordpress.com) - [Github](https://github.com/rvladimiro/) - [Linkedin](https://www.linkedin.com/in/ricardovladimiro/)
+
+## Summary
+
+The objective of this publication is to show classic and rolling retention formulas and their relationship with churn. Churn will be shown as **true retention** for ease of plot reading assuming that $churn=1-retention$.
+
+To do this I will generate a user dataset and a predefined classic retention rate. With both I will create a sessions dataset which will simulate which users have a session on each retention day for 30 days. Since users will be randomly sampled, there will be a natural difference between the predefined classic retention rate and the rolling retention which will be calculated from the sessions dataset.
+
+Since the user dataset is generated and the whole process is fully controlled, the true churn value is known, something that is not possible in real life conditions. Given the known churn I will show the problems and benefits with both classic and rolling approaches.
+
+## Setting up the environment
+
+```{r startup,message=FALSE}
+# Set strings to be characters
+options(stringsAsFactors = FALSE)
+
+# Load packages to the library.
+# To install ognd.tools, install devtools and run install_github('rvladimiro/ognd.tools')
+library(ognd.tools)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+
+# Set the seed to guarantee equal results on all runs
+set.seed(1910)
+```
+
+## Users
+
+First I create a users dataset. This dataset includes 1000 user IDs created randomly and the number of days after day 0 they will return. 40% of the users receive 0 days left. These are the players that never return after the initial day. All other users are distributed uniformly between 1 and 30 days left.
+
+```{r build_user_dataset}
+# Create the dataset
+users = rbind(
+    # 40% of the users never return after D0
+    data.frame(ID = random_strings(n = 400), DAYS_LEFT = 0),
+    # The remaining 60% of the users are divided in 20 groups that will return 2 to 21 days
+    data.frame(ID = random_strings(n = 600), DAYS_LEFT = rep(x = c(1:20), times = 30))
+)
+
+# Print a random sample of the users dataset
+kable(sample_n(tbl = users, size = 10))
+```
+
+## Classic Retention
+
+Classic retention rate is predefined. It starts at 40% on day 1 and goes down non-linearly until 8.1% on day 30. This rate will be used to define how many users are sampled from the users dataset on each day.
+
+```{r create_classic_retention_rate_vector,fig.align='center'}
+# Define the classic retention rate vector
+classic_ret.rate = c(
+    0.400, 0.360, 0.326, 0.296, 0.271, 0.249, 0.230, 0.213, 0.198, 0.185, 0.173, 0.163, 0.154,
+    0.145, 0.138, 0.131, 0.125, 0.119, 0.114, 0.110, 0.106, 0.102, 0.099, 0.095, 0.092, 0.090,
+    0.087, 0.085, 0.083, 0.081
+)
+
+# Plot the vector
+ggplot(aes(x = DAY, y = RET.RATE), data = data.frame(DAY = 1:30, RET.RATE = classic_ret.rate)) +
+    geom_line(color = 'red', alpha = 0.75) +
+    ggtitle('Classic Retention Rate') +
+    theme_bw()
+```
+
+This retention curve is acceptable for the purpose of the simulation but it does not try to mimic anything. The vector will be used as our classic retention rate later on.
+
+**Note that I'm forcing a 40% day 1 retention when the true retention is 60%. This is to force a difference between true and classic retention.**
+
+## Sessions, True and Rolling Retentions
+
+To build the sessions dataset I'll randomly pick user IDs from a pool of retained users. The pool of retained users are all the users that have 1 day or more left to play. Those users have one day subtracted from their days left variable. They are churned players if they have 0 days left.
+
+The true retention rate will also be calculated while building the sessions dataset since it is the only step where it is known day on day.
+
+After the daily active users are sampled, I can calculate the rolling retention. This calculation will be made for all retention days, including retrospective calculation. This will alow to show how rolling retention values varies over time.
+
+```{r simulate_sessions}
+# The cohort size is the total number of user IDs
+COHORT_SIZE = 1000
+# Our initial retention day is 1
+retention_day = 1
+# Create the initial data.frame instances so I can rbind later
+sessions = data.frame()
+# Create the retention data.frame with the known classic retention values
+retention = data.frame(DAY = 1:30, TYPE = 'Classic', RATE = classic_ret.rate)
+
+# For the first 30 days of cohort activity
+while(retention_day <= 30) {
+    
+    # True retention is always known before the users are sampled
+    retention = rbind(
+        retention,
+        data.frame(
+            DAY = retention_day,
+            # Rate of users that will return in the future
+            RATE = sum(users$DAYS_LEFT > 0) / COHORT_SIZE,
+            TYPE = 'True'
+        )
+    )
+    
+    # Get the pool of retained users
+    retained_users = filter(users, DAYS_LEFT > 0)
+    
+    # Get the active users for the day
+    active_users = sample_n(retained_users, size = classic_ret.rate[retention_day] * COHORT_SIZE)
+    
+    # Create one session per user
+    sessions = rbind(
+        sessions,
+        data.frame(DAY = retention_day, USER = active_users$ID)
+    )
+    
+    # Rolling retention is known after the users are sampled
+    # I want to capture change in the value of the rolling retention
+    for(rolling_retention_day in 1:retention_day) {
+        retention = rbind(
+            retention,
+            data.frame(
+                DAY = rolling_retention_day,
+                TYPE = 'Rolling',
+                # This looks weird but it's basically counting unique users after a x retained days
+                RATE = length(unique(
+                    sessions$USER[sessions$DAY >= rolling_retention_day])) / COHORT_SIZE
+            )
+        )
+    }
+    
+    # Subract one day from DAYS_LEFT to the active users
+    users$DAYS_LEFT = users$DAYS_LEFT - as.numeric(users$ID %in% active_users$ID)
+    
+    # Increase retention day
+    retention_day = retention_day + 1
+}
+```
+
+## Comparing retention rates
+
+```{r retention_rates,fig.align='center'}
+# Create a plot with a line for classic and true retention and points for all calculated rolling
+# retention data points
+ggplot() +
+    geom_point(
+        aes(x = DAY, y = RATE, color = TYPE),
+        alpha = 0.5,
+        data = filter(retention, TYPE == 'Rolling')
+    ) +
+    geom_line(
+        aes(x = DAY, y = RATE, color = TYPE),
+        alpha = 0.25, size = 2,
+        data = filter(retention, TYPE != 'Rolling')
+    ) +
+    ggtitle('Comparing Retention Types') +
+    xlab('Retention Day') +
+    ylab('Retention Rate') +
+    theme_bw() +
+    theme(legend.position = 'bottom')
+```
+
+***Classic retention will always underestimate true retention.*** An argument can be made that this simulation is fully random and that particular user behaviour is not being observed e.g. activity diminishing over time, users that only play on weekends, etc. The objective is not to quantify the difference but to show as extremely as possible that it exists.
+
+***Minimum rolling retention rate is equal to the classic retention rate.*** The points under the classic retention line are the first rolling retention calculation, meaning, the rolling retention that was calculated in the same retention day of the classic retention. Since rolling retention counts the number of active users in the retention day and into the future, it is normal that in the first calculation the figure is equal to classic retention.
+
+***Rolling retention rate tends to true retention rate overtime.*** The later rolling retention is calculated, the closer it is to true retention. Note the higher density of rolling retention points on day 1 and how in just one day (the second highest point of rolling retenton on each day) it is clearly out performing classic retention.
